@@ -5,12 +5,15 @@ import math
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-load_ckpt = '/data1/face_data/save_folder/part_box_setting_2019-08-26-21-14-16/ckpts/iter-12000'
+load_ckpt = '/data1/face_data/save_folder/uv_marks_setting_2019-09-09-19-13-32/ckpts/iter-13500'
 
-label_func = data_utils.get_inner_marks
+data_load_func = data_utils.load_uv_data
+
+loss = 'MSE'
+
+seg_part = data_utils.seg_nose
 
 origin_num = 4096
-
 sample_num = 1024
 
 batch_size = 32
@@ -26,17 +29,10 @@ learning_rate_min = 1e-6
 
 weight_decay = 1e-5
 
-jitter = 0.01
-
-rotation_range = [math.pi / 36, math.pi / 36, math.pi / 36, 'g']
-rotation_order = 'rxyz'
-
-scaling_range = [0.1, 0.1, 0.1, 'g']
-
 sample_num_variance = 1 / 8
 sample_num_clip = 1 / 4
 
-x = 4
+x = 3
 
 xconv_param_name = ('K', 'D', 'P', 'C', 'links')
 xconv_params = [dict(zip(xconv_param_name, xconv_param)) for xconv_param in
@@ -55,11 +51,10 @@ sampling = 'fps'
 optimizer = 'adam'
 epsilon = 1e-2
 
-data_dim = 6
-# x,y,z,l,w,h
-label_dim = 6 * 6
+data_dim = 3
+
+label_dim = 10 * 2
 
 with_X_transformation = True
 sorting_method = None
 with_global = True
-with_normal = True

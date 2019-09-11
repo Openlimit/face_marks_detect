@@ -25,6 +25,35 @@ def normalize_points(pc, marks=None, return_centroid=False):
             return pc, scale
 
 
+def load_uv_data(name, point_path, data_dim=None,
+                 landmarks_path='/data1/face_data/uv_coord/landmarks_nose', train=True):
+    face_path = os.path.join(point_path, name)
+    marks_path = os.path.join(landmarks_path, name)
+
+    points_org = np.loadtxt(face_path, dtype=np.float32)
+    landmarks = np.loadtxt(marks_path, dtype=np.float32)
+
+    points = np.zeros((points_org.shape[0], points_org.shape[1] + 1), dtype=np.float32)
+    points[:, :2] = points_org[:, :2]
+    points[:, 3:] = points_org[:, 2:]
+
+    mean = np.mean(points[:, :2], axis=0)
+    points[:, :2] -= mean
+    landmarks[:, :2] -= mean
+
+    points[:, 3:6], _ = normalize_points(points[:, 3:6])
+
+    if data_dim is not None:
+        points = points[:, :data_dim]
+
+    if train:
+        landmarks = landmarks[:, :2]
+        return points, landmarks
+    else:
+        points_org[:, :2] -= mean
+        return points, landmarks, points_org
+
+
 def load_ear_data(name, point_path, need_mean=False, landmarks_path='/data1/ear_data/ear_marks'):
     ear_path = os.path.join(point_path, name)
     ear_point_path = os.path.join(landmarks_path, name[:-4] + '_marks.xyz')
@@ -39,33 +68,6 @@ def load_ear_data(name, point_path, need_mean=False, landmarks_path='/data1/ear_
         return ear, ear_point, mean
     else:
         return ear, ear_point
-
-
-def load_face_data_with_initmarks(name, point_path, need_mean=False,
-                                  landmarks_path='/data1/face_data/landmarks',
-                                  nosemarks_path='/data1/face_data/landmarks_nose',
-                                  initmarks_path='/data1/face_data/landmarks_init'):
-    face_path = os.path.join(point_path, name)
-    marks_path = os.path.join(landmarks_path, name[:-3] + 'bnd')
-    nose_marks_path = os.path.join(nosemarks_path, name[:-3] + 'bnd')
-    init_marks_path = os.path.join(initmarks_path, name[:-4] + '_predict.xyz')
-
-    points = np.loadtxt(face_path, dtype=np.float32)
-    landmarks = np.loadtxt(marks_path, dtype=np.float32)
-    nose_marks = np.loadtxt(nose_marks_path, dtype=np.float32)
-    landmarks = np.row_stack((landmarks, nose_marks))
-    init_marks = np.loadtxt(init_marks_path, dtype=np.float32)
-
-    points[:, 3:] /= 255
-    mean = np.mean(points[:, :3], axis=0)
-    points[:, :3] -= mean
-    landmarks -= mean
-    init_marks -= mean
-
-    if need_mean:
-        return points, landmarks, init_marks, mean
-    else:
-        return points, landmarks, init_marks
 
 
 def load_face_data(name, point_path, data_dim=None, need_mean=False, normalize=False,
@@ -96,20 +98,6 @@ def load_face_data(name, point_path, data_dim=None, need_mean=False, normalize=F
         return points, landmarks
 
 
-def load_test_face_data(name, point_path, landmarks_path='/data1/face_data/test_landmarks'):
-    face_path = os.path.join(point_path, name)
-    points = np.loadtxt(face_path, dtype=np.float32)
-    points[:, 3:] /= 255
-    mean = np.mean(points[:, :3], axis=0)
-    points[:, :3] -= mean
-
-    marks_path = os.path.join(landmarks_path, name[:-3] + 'bnd')
-    landmarks = np.loadtxt(marks_path, dtype=np.float32)
-    landmarks -= mean
-
-    return points, landmarks, mean
-
-
 def face_augment(points, landmarks, xform, range=None, with_normal=False):
     points_xformed = np.copy(points)
     points_xformed[:, :3] = np.dot(points_xformed[:, :3], xform)
@@ -117,6 +105,9 @@ def face_augment(points, landmarks, xform, range=None, with_normal=False):
 
     if with_normal:
         points_xformed[:, 3:6] = np.dot(points_xformed[:, 3:6], xform)
+        norm = np.linalg.norm(points_xformed[:, 3:6], axis=-1)
+        norm = norm.reshape(-1, 1)
+        points_xformed[:, 3:6] = points_xformed[:, 3:6] / norm
 
     if range is None:
         return points_xformed, landmarks_xformed
@@ -166,32 +157,47 @@ def get_part_marks(landmarks):
     return landmarks.flatten()
 
 
-def get_part_box(points, landmarks, expand=0.2):
-    box = np.zeros((12, 3), dtype=np.float32)
+def compute_box(part_marks, expand=0.2):
+    max_point = np.max(part_marks, axis=0)
+    min_points = np.min(part_marks, axis=0)
 
-    eyes, _, eye_means = seg_eye(points, landmarks, expand=expand, need_mean=True)
-    box[0] = np.max(eyes[0], axis=0) + eye_means[0]
-    box[1] = np.min(eyes[0], axis=0) + eye_means[0]
-    eyes[1][:, 0] = -eyes[1][:, 0]
-    box[2] = np.max(eyes[1], axis=0) + eye_means[1]
-    box[3] = np.min(eyes[1], axis=0) + eye_means[1]
-
-    eyebrows, _, eyebrows_means = seg_eyebrow(points, landmarks, expand=expand, need_mean=True)
-    box[4] = np.max(eyebrows[0], axis=0) + eyebrows_means[0]
-    box[5] = np.min(eyebrows[0], axis=0) + eyebrows_means[0]
-    eyebrows[1][:, 0] = -eyebrows[1][:, 0]
-    box[6] = np.max(eyebrows[1], axis=0) + eyebrows_means[1]
-    box[7] = np.min(eyebrows[1], axis=0) + eyebrows_means[1]
-
-    nose, _, nose_mean = seg_nose(points, landmarks, expand=expand, need_mean=True)
-    box[8] = np.max(nose, axis=0) + nose_mean
-    box[9] = np.min(nose, axis=0) + nose_mean
-
-    mouth, _, mouth_mean = seg_mouth(points, landmarks, expand=expand, need_mean=True)
-    box[10] = np.max(mouth, axis=0) + mouth_mean
-    box[11] = np.min(mouth, axis=0) + mouth_mean
-
+    box = np.zeros((6,), dtype=np.float32)
+    box[:3] = (max_point + min_points) / 2
+    box[3:] = (max_point - min_points) * (1.0 + expand)
     return box
+
+
+def get_part_box(landmarks):
+    box = np.zeros((6, 6), dtype=np.float32)
+
+    left_eye = landmarks[0:8]
+    box[0] = compute_box(left_eye)
+    box[0, 3] += 5
+    box[0, 4] += 10
+
+    right_eye = landmarks[8:16]
+    box[1] = compute_box(right_eye)
+    box[1, 3] += 5
+    box[1, 4] += 10
+
+    left_eyebrow = landmarks[16:26]
+    box[2] = compute_box(left_eyebrow)
+    box[2, 4] += 5
+
+    right_eyebrow = landmarks[26:36]
+    box[3] = compute_box(right_eyebrow)
+    box[3, 4] += 5
+
+    nose = landmarks[-10:]
+    box[4] = compute_box(nose)
+    box[4, 2] += (box[4, 5] / 2)
+    box[4, 5] *= 2
+
+    mouth = landmarks[48:68]
+    box[5] = compute_box(mouth)
+    box[5, 4] += 10
+
+    return box.flatten()
 
 
 def marks66_to_93(marks66):
@@ -444,12 +450,27 @@ def cal_rotate_matrix(a, b):
 
 
 if __name__ == '__main__':
-    import math
+    # import math
 
+    # points, landmarks = load_face_data('M0026_AN01AE_F3D.xyz', '/data1/face_data/val', data_dim=3)
+    # rxyz, rotation = pf.get_rotation(rotation_range=[math.pi / 18, math.pi / 18, math.pi / 36, 'g'],
+    #                                  order='rxyz')
+    # print(rxyz)
+    # points, landmarks = face_augment(points, landmarks, rotation)
+    # inner_points = seg_inner_face(points, landmarks)
+    # np.savetxt('/home/meidai/下载/inner_points.xyz', inner_points, fmt='%.6f')
+
+    # points, landmarks = load_uv_data('F0002_HA01BL_F3D.uvxyz', '/data1/face_data/uv_coord/train')
+    # np.savetxt('/home/meidai/下载/points.xyz', points[:, :6], fmt='%.6f')
     points, landmarks = load_face_data('M0026_AN01AE_F3D.xyz', '/data1/face_data/val', data_dim=3)
-    rxyz, rotation = pf.get_rotation(rotation_range=[math.pi / 18, math.pi / 18, math.pi / 36, 'g'],
-                                     order='rxyz')
-    print(rxyz)
-    points, landmarks = face_augment(points, landmarks, rotation)
-    inner_points = seg_inner_face(points, landmarks)
-    np.savetxt('/home/meidai/下载/inner_points.xyz', inner_points, fmt='%.6f')
+    np.savetxt('/home/meidai/下载/points.xyz', points, fmt='%.6f')
+
+    box = get_part_box(landmarks)
+    box = box.reshape(-1, 6)
+    for i in range(box.shape[0]):
+        center = box[i, :3]
+        lwh = box[i, 3:]
+        box_p = np.zeros((2, 3), dtype=np.float32)
+        box_p[0] = center - lwh / 2
+        box_p[1] = center + lwh / 2
+        np.savetxt('/home/meidai/下载/{}.xyz'.format(i), box_p, fmt='%.6f')

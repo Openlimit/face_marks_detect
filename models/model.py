@@ -186,28 +186,6 @@ class PointCNN:
             self.predicts = tf.reshape(self.predicts, (N, *out_shape))
 
 
-class PoseNet:
-    def __init__(self, points, features, is_training, setting, scope='posenet'):
-        xconv_params = setting.xconv_params
-        fc_params = setting.fc_params
-        N = tf.shape(points)[0]
-
-        if features is not None:
-            features = tf.reshape(features, (N, -1, setting.data_dim - 3), name='{}_features_reshape'.format(scope))
-            C_fts = xconv_params[0]['C'] // 2
-            features = pf.dense(features, C_fts, '{}_features_hd'.format(scope), is_training)
-
-        _, layer_fts = get_xconv_list(xconv_params, points, features, is_training, setting, scope=scope)
-        fc_layers = get_fc_list(fc_params, layer_fts[-1], is_training, scope=scope)
-
-        self.fc_mean = tf.reduce_mean(fc_layers[-1], axis=1, name='{}_fc_mean'.format(scope))
-        out = pf.dense(self.fc_mean, setting.label_dim, '{}_predicts'.format(scope),
-                       is_training, with_bn=False, activation=None)
-
-        length = tf.reshape(tf.norm(out, axis=-1), (-1, 1))
-        self.predicts = tf.divide(out, length)
-
-
 if __name__ == '__main__':
     import numpy as np
 

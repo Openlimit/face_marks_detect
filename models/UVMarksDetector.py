@@ -10,7 +10,7 @@ from models.model import PointCNN
 from tools import data_utils
 
 
-class PartBoxDetector(object):
+class UVMarksDetector(object):
     def __init__(self, setting):
         self.setting = setting
         if 'data_load_func' not in self.setting.__dict__:
@@ -37,8 +37,35 @@ class PartBoxDetector(object):
             points_sampled_fps = tf.gather_nd(points_sampled, indices)
             features_sampled_fps = tf.gather_nd(features_sampled, indices) if features_sampled is not None else None
 
-            partbox = PointCNN(points_sampled_fps, features_sampled_fps, self.is_training, setting, scope='partbox')
-            self.predicts = partbox.predicts
+            net = PointCNN(points_sampled_fps, features_sampled_fps, self.is_training, setting,
+                           scope='UVMarksDetector', out_shape=(setting.label_dim // 2, 2))
+            self.predicts = net.predicts
+
+    def save_model(self, export_path):
+        with self.graph.as_default():
+            builder = tf.saved_model.builder.SavedModelBuilder(export_path)
+
+            tensor_info_pts_fts = tf.saved_model.utils.build_tensor_info(self.pts_fts)
+            tensor_info_sample_num_real = tf.saved_model.utils.build_tensor_info(self.sample_num_real)
+            tensor_info_is_training = tf.saved_model.utils.build_tensor_info(self.is_training)
+            tensor_info_predicts = tf.saved_model.utils.build_tensor_info(self.predicts)
+
+            pose_signature = (
+                tf.saved_model.signature_def_utils.build_signature_def(
+                    inputs={'pts_fts': tensor_info_pts_fts,
+                            'sample_num_real': tensor_info_sample_num_real,
+                            'is_training': tensor_info_is_training},
+                    outputs={'predicts': tensor_info_predicts},
+                    method_name=tf.saved_model.signature_constants.PREDICT_METHOD_NAME))
+
+            builder.add_meta_graph_and_variables(
+                self.sess, [tf.saved_model.tag_constants.SERVING],
+                signature_def_map={
+                    'pose_estimator': pose_signature
+                })
+
+            builder.save(as_text=True)
+            print('Done exporting!')
 
     def restore(self):
         with self.graph.as_default():
@@ -73,8 +100,8 @@ class PartBoxDetector(object):
 
         with self.graph.as_default():
             global_step = tf.Variable(0, trainable=False, name='global_step')
-            labels = tf.placeholder(tf.float32, shape=(None, setting.label_dim), name='labels')
-            loss_op = tf.losses.huber_loss(labels, self.predicts, delta=5.0)
+            labels = tf.placeholder(tf.float32, shape=(None, setting.label_dim // 2, 2), name='labels')
+            loss_op = tf.reduce_mean(tf.reduce_sum(tf.square(tf.subtract(labels, self.predicts)), axis=-1))
 
             lr_exp_op = tf.train.exponential_decay(setting.learning_rate_base, global_step, setting.decay_steps,
                                                    setting.decay_rate, staircase=True)
@@ -109,7 +136,6 @@ class PartBoxDetector(object):
                     print('{}-Checkpoint saved to {}!'.format(datetime.now(), filename_ckpt))
 
                     avg_loss = 0
-                    avg_err = 0
                     for batch_val_idx in range(batch_num_val):
                         start_idx = setting.batch_size * batch_val_idx
                         end_idx = min(start_idx + setting.batch_size, num_val)
@@ -118,7 +144,7 @@ class PartBoxDetector(object):
 
                         points_batch = np.zeros((batch_size_val, setting.origin_num, setting.data_dim),
                                                 dtype=np.float32)
-                        labels_batch = np.zeros((batch_size_val, setting.label_dim), dtype=np.float32)
+                        labels_batch = np.zeros((batch_size_val, setting.label_dim // 2, 2), dtype=np.float32)
                         for i, data_name in enumerate(name_batch):
                             if data_name not in val_data:
                                 points, landmarks = self.setting.data_load_func(data_name, args.path_val,
@@ -127,24 +153,18 @@ class PartBoxDetector(object):
 
                             points, landmarks = val_data[data_name]
                             points_batch[i] = data_utils.select_point(points, setting.origin_num)
-                            labels_batch[i] = data_utils.get_part_box(landmarks)
+                            labels_batch[i] = landmarks
 
-                        loss, predicts = self.sess.run([loss_op, self.predicts],
-                                                       feed_dict={
-                                                           self.pts_fts: points_batch,
-                                                           labels: labels_batch,
-                                                           self.is_training: False,
-                                                           self.sample_num_real: np.empty((setting.sample_num,))
-                                                       })
-                        error = np.mean(np.abs(labels_batch - predicts))
-
+                        loss = self.sess.run(loss_op, feed_dict={
+                            self.pts_fts: points_batch,
+                            labels: labels_batch,
+                            self.is_training: False,
+                            self.sample_num_real: np.empty((setting.sample_num,))
+                        })
                         avg_loss += loss
-                        avg_err += error
 
                     avg_loss /= batch_num_val
-                    avg_err /= batch_num_val
-                    print('{}-[Val  ]-Average   Loss: {:.4f}    Error:{:.4f}'
-                          .format(datetime.now(), avg_loss, avg_err))
+                    print('{}-[Val  ]-Average   Loss: {:.4f}'.format(datetime.now(), avg_loss))
                     sys.stdout.flush()
                     ######################################################################
 
@@ -164,20 +184,15 @@ class PartBoxDetector(object):
                 sample_num_train = setting.sample_num + int(offset)
 
                 points_batch = np.zeros((batch_size_train, setting.origin_num, setting.data_dim), dtype=np.float32)
-                labels_batch = np.zeros((batch_size_train, setting.label_dim), dtype=np.float32)
+                labels_batch = np.zeros((batch_size_train, setting.label_dim // 2, 2), dtype=np.float32)
                 for i, data_name in enumerate(name_batch):
                     if data_name not in train_data:
-                        points, landmarks = self.setting.data_load_func(data_name, args.path, data_dim=setting.data_dim)
+                        points, landmarks = setting.data_load_func(data_name, args.path, data_dim=setting.data_dim)
                         train_data[data_name] = (points, landmarks)
-                    points, landmarks = train_data[data_name]
 
-                    xform, _ = pf.get_xform(rotation_range=setting.rotation_range,
-                                            scaling_range=setting.scaling_range,
-                                            order=setting.rotation_order)
-                    points, landmarks = data_utils.face_augment(points, landmarks, xform, range=setting.jitter,
-                                                                with_normal=setting.with_normal)
+                    points, landmarks = train_data[data_name]
                     points_batch[i] = data_utils.select_point(points, setting.origin_num)
-                    labels_batch[i] = data_utils.get_part_box(landmarks)
+                    labels_batch[i] = landmarks
 
                 _, loss = self.sess.run([train_op, loss_op],
                                         feed_dict={
@@ -193,54 +208,16 @@ class PartBoxDetector(object):
                 ######################################################################
             print('{}-Done!'.format(datetime.now()))
 
-    def eval(self, args):
-        setting = self.setting
-        dirname = os.path.dirname(os.path.dirname(setting.load_ckpt))
-        root_folder = os.path.join(args.save_folder, dirname)
-        reslut_folder = os.path.join(root_folder, 'result')
-        if not os.path.exists(reslut_folder):
-            os.makedirs(reslut_folder)
-        sys.stdout = open(os.path.join(root_folder, 'result.txt'), 'w')
-        print(args)
-
-        # Prepare inputs
-        test_names = os.listdir(args.path)
-
-        avg_error = 0.0
-        points_err = np.zeros((len(test_names), setting.label_dim // 3))
-        for i, name in enumerate(test_names):
-            points, landmarks = self.setting.data_load_func(name, args.path, data_dim=setting.data_dim)
-
-            points = data_utils.select_point(points, setting.origin_num)
-            points_batch = np.expand_dims(points, axis=0)
-            labels_batch = setting.label_func(landmarks)
-
-            predicts_np = self.sess.run(self.predicts, feed_dict={
-                self.pts_fts: points_batch,
-                self.is_training: False,
-                self.sample_num_real: np.empty((setting.sample_num,))
-            })
-
-            predicts_np = predicts_np.reshape(-1, 3)
-            labels_np = labels_batch.reshape(-1, 3)
-
-            points_err[i] = np.sqrt(np.sum((predicts_np - labels_np) ** 2, axis=1))
-            error = np.mean(points_err[i])
-            avg_error += error
-            print("{}, error:{:.4f}".format(name, error))
-
-        avg_error /= len(test_names)
-        print("avg_error:{:.4f}".format(avg_error))
-
-        np.savetxt(os.path.join(root_folder, 'error.txt'), points_err, fmt='%.6f')
-
-    def eval_one(self, points):
-        points_batch = np.expand_dims(points, axis=0)
+    def test(self, points):
+        points_batch = np.zeros((self.setting.batch_size, self.setting.origin_num, self.setting.data_dim),
+                                dtype=np.float32)
+        for i in range(self.setting.batch_size):
+            points_batch[i] = data_utils.select_point(points, self.setting.origin_num)
 
         predicts_np = self.sess.run(self.predicts, feed_dict={
             self.pts_fts: points_batch,
             self.is_training: False,
             self.sample_num_real: np.empty((self.setting.sample_num,))
         })
-        predicts_np = predicts_np.reshape(-1, 3)
-        return predicts_np
+        result = np.mean(predicts_np, axis=0)
+        return result
