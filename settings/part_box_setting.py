@@ -5,7 +5,7 @@ import math
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-load_ckpt = '/data1/face_data/save_folder/part_box_setting_2019-08-26-21-14-16/ckpts/iter-12000'
+load_ckpt = '/data1/face_data/save_folder/part_box_setting_2019-09-26-15-33-55/ckpts/iter-21000'
 
 label_func = data_utils.get_inner_marks
 
@@ -57,7 +57,7 @@ epsilon = 1e-2
 
 data_dim = 6
 # x,y,z,l,w,h
-label_dim = 6 * 6
+label_dim = 4 * 6
 
 with_X_transformation = True
 sorting_method = None

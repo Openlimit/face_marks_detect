@@ -183,7 +183,7 @@ class PointCNN:
                                  is_training, with_bn=False, activation=None)
 
         if out_shape is not None:
-            self.predicts = tf.reshape(self.predicts, (N, *out_shape))
+            self.predicts = tf.reshape(self.predicts, (N, *out_shape), name='{}_output'.format(scope))
 
 
 if __name__ == '__main__':

@@ -5,7 +5,7 @@ import math
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-load_ckpt = None
+load_ckpt = '/data1/face_data/save_folder/part_marks_setting_2019-09-27-17-46-43/ckpts/iter-10500'
 
 label_func = data_utils.get_part_marks
 
@@ -18,17 +18,17 @@ eye_seg_part = data_utils.seg_eye
 eyebrow_seg_part = data_utils.seg_eyebrow
 mouth_seg_part = data_utils.seg_mouth
 
-nose_origin_num = 1024
-nose_sample_num = 738
+nose_origin_num = 512
+nose_sample_num = 400
 
-eye_origin_num = 512
+eye_origin_num = 600
 eye_sample_num = 400
 
-eyebrow_origin_num = 512
+eyebrow_origin_num = 600
 eyebrow_sample_num = 400
 
-mouth_origin_num = 600
-mouth_sample_num = 512
+mouth_origin_num = 512
+mouth_sample_num = 400
 
 batch_size = 32
 
@@ -45,7 +45,7 @@ weight_decay = 1e-5
 
 jitter = 0.01
 
-rotation_range = [math.pi / 18, math.pi / 18, math.pi / 18, 'g']
+rotation_range = [math.pi / 36, math.pi / 36, math.pi / 36, 'g']
 rotation_order = 'rxyz'
 
 scaling_range = [0.1, 0.1, 0.1, 'g']
@@ -58,7 +58,7 @@ x = 3
 xconv_param_name = ('K', 'D', 'P', 'C', 'links')
 nose_xconv_params = [dict(zip(xconv_param_name, xconv_param)) for xconv_param in
                      [(8, 1, -1, 16 * x, []),
-                      (12, 2, 384, 32 * x, []),
+                      (12, 2, 256, 32 * x, []),
                       (16, 2, 128, 64 * x, []),
                       (16, 3, 128, 128 * x, [])]]
 eye_xconv_params = [dict(zip(xconv_param_name, xconv_param)) for xconv_param in
@@ -96,15 +96,15 @@ sampling = 'fps'
 optimizer = 'adam'
 epsilon = 1e-2
 
-data_dim = 3
+data_dim = 6
 
 nose_label_dim = 10 * 3
-eye_label_dim = 8 * 3
-eyebrow_label_dim = 10 * 3
+eye_label_dim = 16 * 3
+eyebrow_label_dim = 20 * 3
 mouth_label_dim = 20 * 3
 label_dim = 66 * 3
 
 with_X_transformation = True
 sorting_method = None
 with_global = True
-select_one = True
+with_normal = True

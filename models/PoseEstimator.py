@@ -99,7 +99,7 @@ class PoseEstimator(object):
 
         with self.graph.as_default():
             global_step = tf.Variable(0, trainable=False, name='global_step')
-            labels = tf.placeholder(tf.float32, shape=(None, 3), name='labels')
+            labels = tf.placeholder(tf.float32, shape=(None, setting.label_dim), name='labels')
             loss_op = tf.reduce_mean(tf.reduce_sum(0.5 * tf.square(tf.subtract(labels, self.predicts)), axis=-1))
 
             lr_exp_op = tf.train.exponential_decay(setting.learning_rate_base, global_step, setting.decay_steps,
@@ -156,7 +156,7 @@ class PoseEstimator(object):
                                                              order=setting.rotation_order)
                             points, landmarks = data_utils.face_augment(points, landmarks, rotation,
                                                                         with_normal=setting.with_normal)
-                            inner_points = data_utils.seg_inner_face(points, landmarks)
+                            inner_points, _ = data_utils.seg_inner_face(points, landmarks)
                             points_batch[i] = data_utils.select_point(inner_points, setting.origin_num)
                             labels_batch[i] = rxyz
 
@@ -205,7 +205,7 @@ class PoseEstimator(object):
                                                      order=setting.rotation_order)
                     points, landmarks = data_utils.face_augment(points, landmarks, rotation,
                                                                 range=setting.jitter, with_normal=setting.with_normal)
-                    inner_points = data_utils.seg_inner_face(points, landmarks)
+                    inner_points, _ = data_utils.seg_inner_face(points, landmarks)
                     points_batch[i] = data_utils.select_point(inner_points, setting.origin_num)
                     labels_batch[i] = rxyz
 

@@ -126,7 +126,8 @@ class PartBoxDetector(object):
                                 val_data[data_name] = (points, landmarks)
 
                             points, landmarks = val_data[data_name]
-                            points_batch[i] = data_utils.select_point(points, setting.origin_num)
+                            inner_points, landmarks = data_utils.seg_inner_face(points, landmarks)
+                            points_batch[i] = data_utils.select_point(inner_points, setting.origin_num)
                             labels_batch[i] = data_utils.get_part_box(landmarks)
 
                         loss, predicts = self.sess.run([loss_op, self.predicts],
@@ -176,7 +177,8 @@ class PartBoxDetector(object):
                                             order=setting.rotation_order)
                     points, landmarks = data_utils.face_augment(points, landmarks, xform, range=setting.jitter,
                                                                 with_normal=setting.with_normal)
-                    points_batch[i] = data_utils.select_point(points, setting.origin_num)
+                    inner_points, landmarks = data_utils.seg_inner_face(points, landmarks)
+                    points_batch[i] = data_utils.select_point(inner_points, setting.origin_num)
                     labels_batch[i] = data_utils.get_part_box(landmarks)
 
                 _, loss = self.sess.run([train_op, loss_op],
@@ -193,54 +195,16 @@ class PartBoxDetector(object):
                 ######################################################################
             print('{}-Done!'.format(datetime.now()))
 
-    def eval(self, args):
-        setting = self.setting
-        dirname = os.path.dirname(os.path.dirname(setting.load_ckpt))
-        root_folder = os.path.join(args.save_folder, dirname)
-        reslut_folder = os.path.join(root_folder, 'result')
-        if not os.path.exists(reslut_folder):
-            os.makedirs(reslut_folder)
-        sys.stdout = open(os.path.join(root_folder, 'result.txt'), 'w')
-        print(args)
-
-        # Prepare inputs
-        test_names = os.listdir(args.path)
-
-        avg_error = 0.0
-        points_err = np.zeros((len(test_names), setting.label_dim // 3))
-        for i, name in enumerate(test_names):
-            points, landmarks = self.setting.data_load_func(name, args.path, data_dim=setting.data_dim)
-
-            points = data_utils.select_point(points, setting.origin_num)
-            points_batch = np.expand_dims(points, axis=0)
-            labels_batch = setting.label_func(landmarks)
-
-            predicts_np = self.sess.run(self.predicts, feed_dict={
-                self.pts_fts: points_batch,
-                self.is_training: False,
-                self.sample_num_real: np.empty((setting.sample_num,))
-            })
-
-            predicts_np = predicts_np.reshape(-1, 3)
-            labels_np = labels_batch.reshape(-1, 3)
-
-            points_err[i] = np.sqrt(np.sum((predicts_np - labels_np) ** 2, axis=1))
-            error = np.mean(points_err[i])
-            avg_error += error
-            print("{}, error:{:.4f}".format(name, error))
-
-        avg_error /= len(test_names)
-        print("avg_error:{:.4f}".format(avg_error))
-
-        np.savetxt(os.path.join(root_folder, 'error.txt'), points_err, fmt='%.6f')
-
-    def eval_one(self, points):
-        points_batch = np.expand_dims(points, axis=0)
+    def test(self, inner_points):
+        points_batch = np.zeros((self.setting.batch_size, self.setting.origin_num, self.setting.data_dim),
+                                dtype=np.float32)
+        for i in range(self.setting.batch_size):
+            points_batch[i] = data_utils.select_point(inner_points, self.setting.origin_num)
 
         predicts_np = self.sess.run(self.predicts, feed_dict={
             self.pts_fts: points_batch,
             self.is_training: False,
             self.sample_num_real: np.empty((self.setting.sample_num,))
         })
-        predicts_np = predicts_np.reshape(-1, 3)
-        return predicts_np
+        result = np.mean(predicts_np, axis=0).reshape(-1, 6)
+        return result

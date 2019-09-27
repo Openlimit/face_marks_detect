@@ -30,7 +30,7 @@ def show_normal(data_path):
 
 
 if __name__ == '__main__':
-    compute_normal('/data1/face_data/train', '/data1/face_data/train_normal', '/data1/BU3D_data/BU3D_index')
+    # compute_normal('/data1/face_data/train', '/data1/face_data/train_normal', '/data1/BU3D_data/BU3D_index')
     # show_normal('/data1/face_data/val_normal/M0025_AN01AE_F3D.xyz')
 
     # import shutil
@@ -45,3 +45,5 @@ if __name__ == '__main__':
     #     file_path = os.path.join(path, name)
     #     dst_path = os.path.join(dst, name)
     #     shutil.copy(file_path, dst_path)
+
+    show_normal('/home/meidai/下载/kinectfusion/cur_vn_2_1.xyz')

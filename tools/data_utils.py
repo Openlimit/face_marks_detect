@@ -1,11 +1,10 @@
 import os
 import numpy as np
-import random
 
 from tools import pointfly as pf
 
 
-def normalize_points(pc, marks=None, return_centroid=False):
+def normalize_points(pc, marks=None):
     centroid = np.mean(pc, axis=0)
     pc = pc - centroid
     scale = np.max(np.sqrt(np.sum(pc ** 2, axis=1)))
@@ -14,44 +13,9 @@ def normalize_points(pc, marks=None, return_centroid=False):
     if marks is not None:
         marks = marks - centroid
         marks = marks / scale
-        if return_centroid:
-            return pc, marks, scale, centroid
-        else:
-            return pc, marks, scale
+        return pc, marks, scale, centroid
     else:
-        if return_centroid:
-            return pc, scale, centroid
-        else:
-            return pc, scale
-
-
-def load_uv_data(name, point_path, data_dim=None,
-                 landmarks_path='/data1/face_data/uv_coord/landmarks_nose', train=True):
-    face_path = os.path.join(point_path, name)
-    marks_path = os.path.join(landmarks_path, name)
-
-    points_org = np.loadtxt(face_path, dtype=np.float32)
-    landmarks = np.loadtxt(marks_path, dtype=np.float32)
-
-    points = np.zeros((points_org.shape[0], points_org.shape[1] + 1), dtype=np.float32)
-    points[:, :2] = points_org[:, :2]
-    points[:, 3:] = points_org[:, 2:]
-
-    mean = np.mean(points[:, :2], axis=0)
-    points[:, :2] -= mean
-    landmarks[:, :2] -= mean
-
-    points[:, 3:6], _ = normalize_points(points[:, 3:6])
-
-    if data_dim is not None:
-        points = points[:, :data_dim]
-
-    if train:
-        landmarks = landmarks[:, :2]
-        return points, landmarks
-    else:
-        points_org[:, :2] -= mean
-        return points, landmarks, points_org
+        return pc, scale, centroid
 
 
 def load_ear_data(name, point_path, need_mean=False, landmarks_path='/data1/ear_data/ear_marks'):
@@ -70,7 +34,7 @@ def load_ear_data(name, point_path, need_mean=False, landmarks_path='/data1/ear_
         return ear, ear_point
 
 
-def load_face_data(name, point_path, data_dim=None, need_mean=False, normalize=False,
+def load_face_data(name, point_path, data_dim=None, need_mean=False,
                    landmarks_path='/data1/face_data/landmarks',
                    nosemarks_path='/data1/face_data/landmarks_nose'):
     face_path = os.path.join(point_path, name)
@@ -85,9 +49,6 @@ def load_face_data(name, point_path, data_dim=None, need_mean=False, normalize=F
     mean = np.mean(points[:, :3], axis=0)
     points[:, :3] -= mean
     landmarks -= mean
-
-    if normalize:
-        points[:, :3], landmarks, r = normalize_points(points[:, :3], marks=landmarks)
 
     if data_dim is not None:
         points = points[:, :data_dim]
@@ -157,45 +118,47 @@ def get_part_marks(landmarks):
     return landmarks.flatten()
 
 
-def compute_box(part_marks, expand=0.2):
+def compute_box(part_marks, expand=0.2, with_noise=False):
     max_point = np.max(part_marks, axis=0)
     min_points = np.min(part_marks, axis=0)
 
     box = np.zeros((6,), dtype=np.float32)
     box[:3] = (max_point + min_points) / 2
-    box[3:] = (max_point - min_points) * (1.0 + expand)
+    box[3:] = max_point - min_points
+
+    if with_noise:
+        for i in range(3):
+            box[i] += (box[i + 3] * pf.gauss_clip(0, 0.1, 1))
+            box[i + 3] *= (1.0 + expand + pf.gauss_clip(0, expand, 1))
+    else:
+        box[3:] *= (1.0 + expand)
+
     return box
 
 
-def get_part_box(landmarks):
-    box = np.zeros((6, 6), dtype=np.float32)
+def get_part_box(landmarks, with_noise=False):
+    box = np.zeros((4, 6), dtype=np.float32)
 
-    left_eye = landmarks[0:8]
-    box[0] = compute_box(left_eye)
-    box[0, 3] += 5
-    box[0, 4] += 10
+    eye = landmarks[0:16]
+    box[0] = compute_box(eye, with_noise=with_noise)
+    box[0, 2] += (box[0, 5] / 2)
+    box[0, 4] *= 2
+    box[0, 5] *= 2
 
-    right_eye = landmarks[8:16]
-    box[1] = compute_box(right_eye)
-    box[1, 3] += 5
-    box[1, 4] += 10
-
-    left_eyebrow = landmarks[16:26]
-    box[2] = compute_box(left_eyebrow)
-    box[2, 4] += 5
-
-    right_eyebrow = landmarks[26:36]
-    box[3] = compute_box(right_eyebrow)
-    box[3, 4] += 5
+    eyebrow = landmarks[16:36]
+    box[1] = compute_box(eyebrow, with_noise=with_noise)
+    box[1, 4] *= 1.5
 
     nose = landmarks[-10:]
-    box[4] = compute_box(nose)
-    box[4, 2] += (box[4, 5] / 2)
-    box[4, 5] *= 2
+    box[2] = compute_box(nose, with_noise=with_noise)
+    box[2, 2] += (box[2, 5] / 2)
+    box[2, 3] *= 1.5
+    box[2, 5] *= 2
 
     mouth = landmarks[48:68]
-    box[5] = compute_box(mouth)
-    box[5, 4] += 10
+    box[3] = compute_box(mouth, with_noise=with_noise)
+    box[3, 4] *= 1.5
+    box[3, 5] *= 2
 
     return box.flatten()
 
@@ -227,177 +190,42 @@ def select_point(points, npoints, labels=None):
         return points
 
 
-def select_one_of_two_parts(points_list, landmarks_list):
-    idx = random.randint(0, 1)
-    return points_list[idx], landmarks_list[idx]
+def seg_part(points, landmarks, box):
+    center = box[:3]
+    lwh = box[3:]
+    min_point = center - lwh / 2
+    max_point = center + lwh / 2
+
+    idx1 = np.all(points[:, :3] <= max_point, axis=-1)
+    idx2 = np.all(points[:, :3] >= min_point, axis=-1)
+    idx = np.logical_and(idx1, idx2)
+
+    part_points = np.copy(points[idx])
+    centroid = np.mean(part_points[:, :3], axis=0)
+    part_points[:, :3] = part_points[:, :3] - centroid
+    part_marks = landmarks - centroid
+
+    return part_points, part_marks, centroid
 
 
-def seg_nose(points, landmarks, expand=0.2, need_mean=False, box=None):
+def seg_nose(points, landmarks, boxes):
     nose = landmarks[-10:]
-
-    if box is None:
-        up = np.max(nose[:, 1])
-        down = np.min(nose[:, 1])
-        left = np.min(nose[:, 0])
-        right = np.max(nose[:, 0])
-
-        expand_h = (up - down) * expand
-        expand_w = (right - left) * expand
-        up += expand_h
-        down -= expand_h
-        right += expand_w
-        left -= expand_w
-
-        idx = np.where(
-            (points[:, 1] >= down) & (points[:, 1] <= up)
-            & (points[:, 0] >= left) & (points[:, 0] <= right))
-
-    else:
-        idx1 = np.all(points[:, :3] < box[8], axis=-1)
-        idx2 = np.all(points[:, :3] > box[9], axis=-1)
-        idx = np.logical_and(idx1, idx2)
-
-    part_points = np.copy(points[idx])
-    mean = np.mean(part_points[:, :3], axis=0)
-    part_points[:, :3] -= mean
-    part_marks = nose - mean
-
-    if need_mean:
-        return part_points, part_marks, mean
-    else:
-        return part_points, part_marks
+    return seg_part(points, nose, boxes[2])
 
 
-def seg_eye(points, landmarks, expand=0.2, need_mean=False, box=None):
-    left_eye = landmarks[0:8]
-    right_eye = landmarks[8:16]
-
-    parts = []
-    parts_lk = []
-    means = []
-    for i, marks in enumerate([left_eye, right_eye]):
-        if box is None:
-            up = np.max(marks[:, 1])
-            down = np.min(marks[:, 1])
-            left = np.min(marks[:, 0])
-            right = np.max(marks[:, 0])
-
-            expand_h = (up - down) * expand
-            expand_w = (right - left) * expand
-            up += expand_h
-            down -= expand_h
-            right += expand_w
-            left -= expand_w
-
-            idx = np.where(
-                (points[:, 1] >= down) & (points[:, 1] <= up)
-                & (points[:, 0] >= left) & (points[:, 0] <= right))
-        else:
-            idx1 = np.all(points[:, :3] < box[i * 2], axis=-1)
-            idx2 = np.all(points[:, :3] > box[i * 2 + 1], axis=-1)
-            idx = np.logical_and(idx1, idx2)
-
-        part_points = np.copy(points[idx])
-        mean = np.mean(part_points[:, :3], axis=0)
-        part_points[:, :3] -= mean
-        part_marks = marks - mean
-
-        if i == 1:
-            part_points[:, 0] = -part_points[:, 0]
-            part_marks[:, 0] = -part_marks[:, 0]
-
-        parts.append(part_points)
-        parts_lk.append(part_marks)
-        means.append(mean)
-
-    if need_mean:
-        return parts, parts_lk, means
-    else:
-        return parts, parts_lk
+def seg_eye(points, landmarks, boxes):
+    eye = landmarks[0:16]
+    return seg_part(points, eye, boxes[0])
 
 
-def seg_eyebrow(points, landmarks, expand=0.2, need_mean=False, box=None):
-    left_eyebrow = landmarks[16:26]
-    right_eyebrow = landmarks[26:36]
-
-    parts = []
-    parts_lk = []
-    means = []
-    for i, marks in enumerate([left_eyebrow, right_eyebrow]):
-        if box is None:
-            up = np.max(marks[:, 1])
-            down = np.min(marks[:, 1])
-            left = np.min(marks[:, 0])
-            right = np.max(marks[:, 0])
-
-            expand_h = (up - down) * expand
-            expand_w = (right - left) * expand
-            up += expand_h
-            down -= expand_h
-            right += expand_w
-            left -= expand_w
-
-            idx = np.where(
-                (points[:, 1] >= down) & (points[:, 1] <= up)
-                & (points[:, 0] >= left) & (points[:, 0] <= right))
-        else:
-            idx1 = np.all(points[:, :3] < box[i * 2 + 4], axis=-1)
-            idx2 = np.all(points[:, :3] > box[i * 2 + 5], axis=-1)
-            idx = np.logical_and(idx1, idx2)
-
-        part_points = np.copy(points[idx])
-        mean = np.mean(part_points[:, :3], axis=0)
-        part_points[:, :3] -= mean
-        part_marks = marks - mean
-
-        if i == 1:
-            part_points[:, 0] = -part_points[:, 0]
-            part_marks[:, 0] = -part_marks[:, 0]
-
-        parts.append(part_points)
-        parts_lk.append(part_marks)
-        means.append(mean)
-
-    if need_mean:
-        return parts, parts_lk, means
-    else:
-        return parts, parts_lk
+def seg_eyebrow(points, landmarks, boxes):
+    eyebrow = landmarks[16:36]
+    return seg_part(points, eyebrow, boxes[1])
 
 
-def seg_mouth(points, landmarks, expand=0.2, need_mean=False, box=None):
+def seg_mouth(points, landmarks, boxes):
     mouth = landmarks[48:68]
-
-    if box is None:
-        up = np.max(mouth[:, 1])
-        down = np.min(mouth[:, 1])
-        left = np.min(mouth[:, 0])
-        right = np.max(mouth[:, 0])
-
-        expand_h = (up - down) * expand
-        expand_w = (right - left) * expand
-        up += expand_h
-        down -= expand_h
-        right += expand_w
-        left -= expand_w
-
-        idx = np.where(
-            (points[:, 1] >= down) & (points[:, 1] <= up)
-            & (points[:, 0] >= left) & (points[:, 0] <= right))
-
-    else:
-        idx1 = np.all(points[:, :3] < box[10], axis=-1)
-        idx2 = np.all(points[:, :3] > box[11], axis=-1)
-        idx = np.logical_and(idx1, idx2)
-
-    part_points = np.copy(points[idx])
-    mean = np.mean(part_points[:, :3], axis=0)
-    part_points[:, :3] -= mean
-    part_marks = mouth - mean
-
-    if need_mean:
-        return part_points, part_marks, mean
-    else:
-        return part_points, part_marks
+    return seg_part(points, mouth, boxes[3])
 
 
 def seg_inner_face(points, landmarks, expand=0.5):
@@ -421,32 +249,9 @@ def seg_inner_face(points, landmarks, expand=0.5):
     idx = np.logical_and(idx1, idx2)
 
     inner_points = np.copy(points[idx])
-    inner_points[:, :3], _ = normalize_points(inner_points[:, :3])
+    inner_points[:, :3], landmarks, _, _ = normalize_points(inner_points[:, :3], marks=landmarks)
 
-    return inner_points
-
-
-def cal_rotate_matrix(a, b):
-    rot_axis = np.cross(b, a)
-    rot_angle = np.arccos(np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b)))
-
-    rot_mat = np.zeros((3, 3), dtype=np.float32)
-
-    rot_axis /= np.linalg.norm(rot_axis)
-
-    rot_mat[0, 0] = np.cos(rot_angle) + rot_axis[0] * rot_axis[0] * (1 - np.cos(rot_angle))
-    rot_mat[0, 1] = rot_axis[0] * rot_axis[1] * (1 - np.cos(rot_angle)) - rot_axis[2] * np.sin(rot_angle)
-    rot_mat[0, 2] = rot_axis[1] * np.sin(rot_angle) + rot_axis[0] * rot_axis[2] * (1 - np.cos(rot_angle))
-
-    rot_mat[1, 0] = rot_axis[2] * np.sin(rot_angle) + rot_axis[0] * rot_axis[1] * (1 - np.cos(rot_angle))
-    rot_mat[1, 1] = np.cos(rot_angle) + rot_axis[1] * rot_axis[1] * (1 - np.cos(rot_angle))
-    rot_mat[1, 2] = -rot_axis[0] * np.sin(rot_angle) + rot_axis[1] * rot_axis[2] * (1 - np.cos(rot_angle))
-
-    rot_mat[2, 0] = -rot_axis[1] * np.sin(rot_angle) + rot_axis[0] * rot_axis[2] * (1 - np.cos(rot_angle))
-    rot_mat[2, 1] = rot_axis[0] * np.sin(rot_angle) + rot_axis[1] * rot_axis[2] * (1 - np.cos(rot_angle))
-    rot_mat[2, 2] = np.cos(rot_angle) + rot_axis[2] * rot_axis[2] * (1 - np.cos(rot_angle))
-
-    return rot_mat
+    return inner_points, landmarks
 
 
 if __name__ == '__main__':
@@ -462,10 +267,11 @@ if __name__ == '__main__':
 
     # points, landmarks = load_uv_data('F0002_HA01BL_F3D.uvxyz', '/data1/face_data/uv_coord/train')
     # np.savetxt('/home/meidai/下载/points.xyz', points[:, :6], fmt='%.6f')
-    points, landmarks = load_face_data('M0026_AN01AE_F3D.xyz', '/data1/face_data/val', data_dim=3)
-    np.savetxt('/home/meidai/下载/points.xyz', points, fmt='%.6f')
 
-    box = get_part_box(landmarks)
+    points, landmarks = load_face_data('M0032_NE00WH_F3D.xyz', '/data1/face_data/val', data_dim=3)
+    np.savetxt('/home/meidai/下载/data_utils/points.xyz', points, fmt='%.6f')
+
+    box = get_part_box(landmarks, with_noise=False)
     box = box.reshape(-1, 6)
     for i in range(box.shape[0]):
         center = box[i, :3]
@@ -473,4 +279,20 @@ if __name__ == '__main__':
         box_p = np.zeros((2, 3), dtype=np.float32)
         box_p[0] = center - lwh / 2
         box_p[1] = center + lwh / 2
-        np.savetxt('/home/meidai/下载/{}.xyz'.format(i), box_p, fmt='%.6f')
+        np.savetxt('/home/meidai/下载/data_utils/{}.xyz'.format(i), box_p, fmt='%.6f')
+
+    eye, eye_marks, _, _ = seg_eye(points, landmarks, box)
+    np.savetxt('/home/meidai/下载/data_utils/eye.xyz', eye, fmt='%.6f')
+    np.savetxt('/home/meidai/下载/data_utils/eye_marks.xyz', eye_marks, fmt='%.6f')
+
+    eyebrow, eyebrow_marks, _, _ = seg_eyebrow(points, landmarks, box)
+    np.savetxt('/home/meidai/下载/data_utils/eyebrow.xyz', eyebrow, fmt='%.6f')
+    np.savetxt('/home/meidai/下载/data_utils/eyebrow_marks.xyz', eyebrow_marks, fmt='%.6f')
+
+    nose, nose_marks, _, _ = seg_nose(points, landmarks, box)
+    np.savetxt('/home/meidai/下载/data_utils/nose.xyz', nose, fmt='%.6f')
+    np.savetxt('/home/meidai/下载/data_utils/nose_marks.xyz', nose_marks, fmt='%.6f')
+
+    mouth, mouth_marks, _, _ = seg_mouth(points, landmarks, box)
+    np.savetxt('/home/meidai/下载/data_utils/mouth.xyz', mouth, fmt='%.6f')
+    np.savetxt('/home/meidai/下载/data_utils/mouth_marks.xyz', mouth_marks, fmt='%.6f')

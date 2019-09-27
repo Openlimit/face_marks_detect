@@ -53,7 +53,7 @@ class PartMarksDetector(object):
                 features_sampled_fps = tf.gather_nd(features_sampled, indices) if features_sampled is not None else None
 
                 net = PointCNN(points_sampled_fps, features_sampled_fps, self.is_training, self.settings[name],
-                               scope=name)
+                               scope=name, out_shape=(self.settings[name].label_dim // 3, 3))
                 self.predictss[name] = net.predicts
 
     def restore(self):
@@ -62,7 +62,7 @@ class PartMarksDetector(object):
             saver.restore(self.sess, self.setting.load_ckpt)
             print('Checkpoint loaded from {}!'.format(self.setting.load_ckpt))
 
-    def train(self, args, partBox):
+    def train(self, args):
         time_string = datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
         root_folder = os.path.join(args.save_folder, '%s_%s' % (args.setting, time_string))
         if not os.path.exists(root_folder):
@@ -79,7 +79,6 @@ class PartMarksDetector(object):
         random.shuffle(train_names)
         train_data = {}
         val_data = {}
-        box_data = {}
 
         num_train = len(train_names)
         num_val = len(val_names)
@@ -94,9 +93,10 @@ class PartMarksDetector(object):
             labelss = {}
             loss_ops = {}
             for name in setting.part_list:
-                labelss[name] = tf.placeholder(tf.float32, shape=(None, self.settings[name].label_dim),
+                labelss[name] = tf.placeholder(tf.float32, shape=(None, self.settings[name].label_dim // 3, 3),
                                                name='{}_labels'.format(name))
-                loss_ops[name] = tf.losses.huber_loss(labelss[name], self.predictss[name], delta=10.0)
+                loss_ops[name] = tf.reduce_mean(
+                    tf.reduce_sum(tf.square(tf.subtract(labelss[name], self.predictss[name])), axis=-1))
 
             lr_exp_op = tf.train.exponential_decay(setting.learning_rate_base, global_step, setting.decay_steps,
                                                    setting.decay_rate, staircase=True)
@@ -128,11 +128,9 @@ class PartMarksDetector(object):
 
             train_list = []
             loss_list = []
-            predict_list = []
             for name in setting.part_list:
                 train_list.append(train_ops[name])
                 loss_list.append(loss_ops[name])
-                predict_list.append(self.predictss[name])
 
             self.sess.run(init_op)
             for batch_idx_train in range(batch_num):
@@ -145,10 +143,8 @@ class PartMarksDetector(object):
                     print('{}-Checkpoint saved to {}!'.format(datetime.now(), filename_ckpt))
 
                     avg_loss = {}
-                    avg_error = {}
                     for name in setting.part_list:
                         avg_loss[name] = 0
-                        avg_error[name] = 0
 
                     for batch_val_idx in range(batch_num_val):
                         start_idx = setting.batch_size * batch_val_idx
@@ -162,7 +158,7 @@ class PartMarksDetector(object):
                             points_batches[name] = np.zeros(
                                 (batch_size_val, self.settings[name].origin_num, setting.data_dim),
                                 dtype=np.float32)
-                            labels_batches[name] = np.zeros((batch_size_val, self.settings[name].label_dim),
+                            labels_batches[name] = np.zeros((batch_size_val, self.settings[name].label_dim // 3, 3),
                                                             dtype=np.float32)
 
                         for i, data_name in enumerate(name_batch):
@@ -170,19 +166,15 @@ class PartMarksDetector(object):
                                 points, landmarks = data_utils.load_face_data(data_name, args.path_val,
                                                                               data_dim=setting.data_dim)
                                 val_data[data_name] = (points, landmarks)
-                                tmp_points = data_utils.select_point(points, partBox.setting.origin_num)
-                                box_data[data_name] = partBox.eval_one(tmp_points)
 
                             points, landmarks = val_data[data_name]
+                            boxes = data_utils.get_part_box(landmarks, with_noise=False)
+                            boxes = boxes.reshape(-1, 6)
                             for part in setting.part_list:
-                                seg_points, seg_landmarks = self.settings[part].seg_part(points, landmarks,
-                                                                                         box=box_data[data_name])
-                                if part == 'eye' or part == 'eyebrow':
-                                    seg_points, seg_landmarks = data_utils.select_one_of_two_parts(
-                                        seg_points, seg_landmarks)
+                                seg_points, seg_landmarks, _ = self.settings[part].seg_part(points, landmarks, boxes)
                                 points_batches[part][i] = data_utils.select_point(seg_points,
                                                                                   self.settings[part].origin_num)
-                                labels_batches[part][i] = setting.label_func(seg_landmarks)
+                                labels_batches[part][i] = seg_landmarks
 
                         feed_dict = {self.is_training: False}
                         for name in setting.part_list:
@@ -190,24 +182,18 @@ class PartMarksDetector(object):
                             feed_dict[labelss[name]] = labels_batches[name]
                             feed_dict[self.sample_num_reals[name]] = np.empty((self.settings[name].sample_num,))
 
-                        result = self.sess.run([*loss_list, *predict_list], feed_dict=feed_dict)
-                        loss_val = result[:part_list_size]
-                        predicts_val = result[part_list_size:]
+                        result = self.sess.run(loss_list, feed_dict=feed_dict)
                         for i, name in enumerate(setting.part_list):
-                            avg_loss[name] += loss_val[i]
-                            predict = predicts_val[i].reshape(batch_size_val, -1, 3)
-                            label = labels_batches[name].reshape(batch_size_val, -1, 3)
-                            avg_error[name] += np.mean(np.sqrt(np.sum((predict - label) ** 2, axis=-1)))
+                            avg_loss[name] += result[i]
 
                     s = '{}-[Val]-Average Loss--'.format(datetime.now())
                     for name in setting.part_list:
                         avg_loss[name] /= batch_num_val
-                        avg_error[name] /= batch_num_val
-                        s += '   {}:{:.4f} {:.4f}'.format(name, avg_loss[name], avg_error[name])
+                        s += '   {}:{:.4f}'.format(name, avg_loss[name])
                     print(s)
 
                     learn_rate = self.sess.run(lr_clip_op)
-                    print('learn_rate:{:.4f}'.format(learn_rate))
+                    print('learn_rate:{}'.format(learn_rate))
                     sys.stdout.flush()
                     ######################################################################
 
@@ -234,31 +220,28 @@ class PartMarksDetector(object):
                     points_batches[name] = np.zeros(
                         (batch_size_train, self.settings[name].origin_num, setting.data_dim),
                         dtype=np.float32)
-                    labels_batches[name] = np.zeros((batch_size_train, self.settings[name].label_dim), dtype=np.float32)
+                    labels_batches[name] = np.zeros((batch_size_train, self.settings[name].label_dim // 3, 3),
+                                                    dtype=np.float32)
 
                 for i, data_name in enumerate(name_batch):
                     if data_name not in train_data:
                         points, landmarks = data_utils.load_face_data(data_name, args.path, data_dim=setting.data_dim)
                         train_data[data_name] = (points, landmarks)
 
-                        tmp_points = data_utils.select_point(points, partBox.setting.origin_num)
-                        box_data[data_name] = partBox.eval_one(tmp_points)
-
                     points, landmarks = train_data[data_name]
+                    boxes = data_utils.get_part_box(landmarks, with_noise=True)
+                    boxes = boxes.reshape(-1, 6)
                     xform, _ = pf.get_xform(rotation_range=setting.rotation_range,
                                             scaling_range=setting.scaling_range,
                                             order=setting.rotation_order)
 
                     for part in setting.part_list:
-                        seg_points, seg_landmarks = self.settings[part].seg_part(points, landmarks,
-                                                                                 box=box_data[data_name])
-                        if self.setting.select_one and (part == 'eye' or part == 'eyebrow'):
-                            seg_points, seg_landmarks = data_utils.select_one_of_two_parts(seg_points, seg_landmarks)
-
+                        seg_points, seg_landmarks, _ = self.settings[part].seg_part(points, landmarks, boxes)
                         seg_points, seg_landmarks = data_utils.face_augment(seg_points, seg_landmarks,
-                                                                            xform, range=setting.jitter)
+                                                                            xform, range=setting.jitter,
+                                                                            with_normal=setting.with_normal)
                         points_batches[part][i] = data_utils.select_point(seg_points, self.settings[part].origin_num)
-                        labels_batches[part][i] = setting.label_func(seg_landmarks)
+                        labels_batches[part][i] = seg_landmarks
 
                 feed_dict = {self.is_training: True}
                 for name in setting.part_list:
@@ -266,174 +249,40 @@ class PartMarksDetector(object):
                     feed_dict[labelss[name]] = labels_batches[name]
                     feed_dict[self.sample_num_reals[name]] = np.empty((sample_num_trains[name],))
 
-                result = self.sess.run([*train_list, *loss_list, *predict_list], feed_dict=feed_dict)
-                loss_val = result[part_list_size:part_list_size * 2]
-                predicts_val = result[part_list_size * 2:]
+                result = self.sess.run([*train_list, *loss_list], feed_dict=feed_dict)
+                loss_val = result[part_list_size:]
                 if batch_idx_train % 10 == 0:
                     s = '{}-[Train]-Iter  {:06d}--'.format(datetime.now(), batch_idx_train)
                     for i, name in enumerate(setting.part_list):
-                        predict = predicts_val[i].reshape(batch_size_train, -1, 3)
-                        label = labels_batches[name].reshape(batch_size_train, -1, 3)
-                        error = np.mean(np.sqrt(np.sum((predict - label) ** 2, axis=-1)))
-                        s += '   {}:{:.4f} {:.4f}'.format(name, loss_val[i], error)
+                        s += '   {}:{:.4f}'.format(name, loss_val[i])
                     print(s)
                 sys.stdout.flush()
                 ######################################################################
             print('{}-Done!'.format(datetime.now()))
 
-    def eval(self, args, partBox):
-        setting = self.setting
-        dirname = os.path.dirname(os.path.dirname(setting.load_ckpt))
-        root_folder = os.path.join(args.save_folder, dirname)
-        reslut_folder = os.path.join(root_folder, 'result')
-        if not os.path.exists(reslut_folder):
-            os.makedirs(reslut_folder)
-        sys.stdout = open(os.path.join(root_folder, 'result.txt'), 'w')
-        print(args)
-
-        test_names = os.listdir(args.path)
-
-        error = np.zeros((len(test_names), 6))
-        points_err = np.zeros((len(test_names), setting.label_dim // 3))
-        for i, name in enumerate(test_names):
-            points_batches = {}
-            labels_batches = {}
-            for part in setting.part_list:
-                points_batches[part] = np.zeros((1, self.settings[part].origin_num, setting.data_dim),
-                                                dtype=np.float32)
-                labels_batches[part] = np.zeros((1, self.settings[part].label_dim), dtype=np.float32)
-
-            points, landmarks = data_utils.load_face_data(name, args.path, data_dim=setting.data_dim)
-
-            tmp_points = data_utils.select_point(points, partBox.setting.origin_num)
-            box = partBox.eval_one(tmp_points)
-
-            right_points = {}
-            right_marks = {}
-            for part in setting.part_list:
-                seg_points, seg_marks = self.settings[part].seg_part(points, landmarks, box=box)
-                if part == 'eye' or part == 'eyebrow':
-                    right_points[part], right_marks[part] = seg_points[1], seg_marks[1]
-                    right_points[part] = data_utils.select_point(right_points[part], self.settings[part].origin_num)
-                    right_marks[part] = setting.label_func(right_marks[part])
-                    seg_points, seg_marks = seg_points[0], seg_marks[0]
-
-                points_batches[part][0] = data_utils.select_point(seg_points, self.settings[part].origin_num)
-                labels_batches[part][0] = setting.label_func(seg_marks)
-
-            feed_dict = {self.is_training: False}
-            for part in setting.part_list:
-                feed_dict[self.pts_ftss[part]] = points_batches[part]
-                feed_dict[self.sample_num_reals[part]] = np.empty((self.settings[part].sample_num,))
-            predicts_result = self.sess.run(list(self.predictss.values()), feed_dict=feed_dict)
-
-            feed_dict = {
-                self.is_training: False,
-                self.pts_ftss['eye']: np.expand_dims(right_points['eye'], axis=0),
-                self.pts_ftss['eyebrow']: np.expand_dims(right_points['eyebrow'], axis=0),
-                self.sample_num_reals['eye']: np.empty((self.settings['eye'].sample_num,)),
-                self.sample_num_reals['eyebrow']: np.empty((self.settings['eyebrow'].sample_num,))
-            }
-            predicts_right = self.sess.run([self.predictss['eye'], self.predictss['eyebrow']], feed_dict=feed_dict)
-
-            predicts = {
-                'nose': predicts_result[0].reshape(-1, 3),
-                'left_eye': predicts_result[1].reshape(-1, 3),
-                'right_eye': predicts_right[0].reshape(-1, 3),
-                'left_eyebrow': predicts_result[2].reshape(-1, 3),
-                'right_eyebrow': predicts_right[1].reshape(-1, 3),
-                'mouth': predicts_result[3].reshape(-1, 3)
-            }
-            labels = {
-                'nose': labels_batches['nose'].reshape(-1, 3),
-                'left_eye': labels_batches['eye'].reshape(-1, 3),
-                'right_eye': right_marks['eye'].reshape(-1, 3),
-                'left_eyebrow': labels_batches['eyebrow'].reshape(-1, 3),
-                'right_eyebrow': right_marks['eyebrow'].reshape(-1, 3),
-                'mouth': labels_batches['mouth'].reshape(-1, 3)
-            }
-
-            print('{}'.format(name), end='')
-            cur = 0
-            for j, part in enumerate(['left_eye', 'right_eye', 'left_eyebrow', 'right_eyebrow', 'nose', 'mouth']):
-                tmp = np.sqrt(np.sum((predicts[part] - labels[part]) ** 2, axis=1))
-                points_err[i, cur:cur + tmp.shape[0]] = tmp
-                cur += tmp.shape[0]
-                error[i, j] = np.mean(tmp)
-                print("\t{}:{:.4f}".format(part, error[i, j]), end='')
-            print('')
-
-        mean_err = np.mean(error, axis=0)
-        print('mean_err', end='')
-        for i, part in enumerate(['left_eye', 'right_eye', 'left_eyebrow', 'right_eyebrow', 'nose', 'mouth']):
-            print('\t{}: {:.4f}'.format(part, mean_err[i]), end='')
-        print('\n')
-
-        np.savetxt(os.path.join(root_folder, 'error.txt'), points_err, fmt='%.6f')
-
-    def eval_one(self, points, landmarks):
+    def test(self, points, boxes):
         points_batches = {}
-        labels_batches = {}
-        for part in self.setting.part_list:
-            points_batches[part] = np.zeros((1, self.settings[part].origin_num, self.setting.data_dim),
+        parts = {}
+        centroids = {}
+        for name in self.setting.part_list:
+            points_batches[name] = np.zeros((32, self.settings[name].origin_num, self.setting.data_dim),
                                             dtype=np.float32)
-            labels_batches[part] = np.zeros((1, self.settings[part].label_dim), dtype=np.float32)
-
-        right_points = {}
-        right_marks = {}
-        right_means = {}
-        means = {}
-        for part in self.setting.part_list:
-            seg_points, seg_landmarks, mean = self.settings[part].seg_part(points, landmarks,
-                                                                           need_mean=True)
-            means[part] = mean
-            if part == 'eye' or part == 'eyebrow':
-                right_points[part], right_marks[part] = seg_points[1], seg_landmarks[1]
-                right_points[part] = data_utils.select_point(right_points[part], self.settings[part].origin_num)
-                right_marks[part] = self.setting.label_func(right_marks[part])
-                right_means[part] = mean[1]
-
-                seg_points, seg_landmarks = seg_points[0], seg_landmarks[0]
-                means[part] = mean[0]
-
-            points_batches[part][0] = data_utils.select_point(seg_points, self.settings[part].origin_num)
-            labels_batches[part][0] = self.setting.label_func(seg_landmarks)
+            parts[name], _, centroids[name] = self.settings[name].seg_part(points, np.zeros((66, 3)),
+                                                                                         boxes)
+            for i in range(32):
+                points_batches[name][i] = data_utils.select_point(parts[name],
+                                                                  self.settings[name].origin_num)
 
         feed_dict = {self.is_training: False}
-        for part in self.setting.part_list:
-            feed_dict[self.pts_ftss[part]] = points_batches[part]
-            feed_dict[self.sample_num_reals[part]] = np.empty((self.settings[part].sample_num,))
-        predicts_result = self.sess.run(list(self.predictss.values()), feed_dict=feed_dict)
+        predict_list = []
+        for name in self.setting.part_list:
+            feed_dict[self.pts_ftss[name]] = points_batches[name]
+            feed_dict[self.sample_num_reals[name]] = np.empty((self.settings[name].sample_num,))
+            predict_list.append(self.predictss[name])
 
-        feed_dict = {
-            self.is_training: False,
-            self.pts_ftss['eye']: np.expand_dims(right_points['eye'], axis=0),
-            self.pts_ftss['eyebrow']: np.expand_dims(right_points['eyebrow'], axis=0),
-            self.sample_num_reals['eye']: np.empty((self.settings['eye'].sample_num,)),
-            self.sample_num_reals['eyebrow']: np.empty((self.settings['eyebrow'].sample_num,))
-        }
-        predicts_right = self.sess.run([self.predictss['eye'], self.predictss['eyebrow']], feed_dict=feed_dict)
+        result = self.sess.run(predict_list, feed_dict=feed_dict)
+        predict = {}
+        for i, name in enumerate(self.setting.part_list):
+            predict[name] = np.mean(result[i], axis=0)
 
-        predicts = {
-            'nose': predicts_result[0].reshape(-1, 3) + means['nose'],
-            'left_eye': predicts_result[1].reshape(-1, 3) + means['eye'],
-            'right_eye': predicts_right[0].reshape(-1, 3),
-            'left_eyebrow': predicts_result[2].reshape(-1, 3) + means['eyebrow'],
-            'right_eyebrow': predicts_right[1].reshape(-1, 3),
-            'mouth': predicts_result[3].reshape(-1, 3) + means['mouth']
-        }
-
-        predicts['right_eye'][:, 0] = -predicts['right_eye'][:, 0]
-        predicts['right_eye'] = predicts['right_eye'] + right_means['eye']
-        predicts['right_eyebrow'][:, 0] = -predicts['right_eyebrow'][:, 0]
-        predicts['right_eyebrow'] = predicts['right_eyebrow'] + right_means['eyebrow']
-
-        predict_marks = np.zeros((66, 3), dtype=np.float32)
-        predict_marks[0:8] = predicts['left_eye']
-        predict_marks[8:16] = predicts['right_eye']
-        predict_marks[16:26] = predicts['left_eyebrow']
-        predict_marks[26:36] = predicts['right_eyebrow']
-        predict_marks[36:46] = predicts['nose']
-        predict_marks[46:66] = predicts['mouth']
-
-        return predict_marks
+        return predict, parts, centroids
