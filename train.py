@@ -226,6 +226,7 @@ def test_pose_estimator(data_path):
                                               os.path.join(data_path, 'marks.txt'))
     np.savetxt(os.path.join(data_path, 'mesh.xyz'), points[:, :3], fmt='%.6f')
     inner_points, scale, centroid = md_utils.seg_inner_face(points, landmarks)
+    np.savetxt(os.path.join(data_path, 'inner_points.xyz'), inner_points[:, :3], fmt='%.6f')
 
     predictor = PoseEstimator(pose_setting)
     predictor.restore()
@@ -277,9 +278,9 @@ def test_pose_estimator_batch(dir_path):
 
 if __name__ == '__main__':
     # train_pose_estimator()
-    # test_pose_estimator('/data1/rawscan_data/dir/0af4122fbaab5387afb162356a07740ffile')
+    test_pose_estimator('/home/meidai/下载/9656212361fcbb21f6e290194422f039')
     # test_pose_estimator_batch('/data1/rawscan_data/test')
     # train_partbox()
     # test_partbox('/home/meidai/下载/rawscan2')
     # train_partmarks()
-    test_partmarks('/home/meidai/下载/refine_rawscan/521fd5e7e4ff8e2b82a4920f09a3e11bfile (1)')
+    # test_partmarks('/home/meidai/下载/refine_rawscan/521fd5e7e4ff8e2b82a4920f09a3e11bfile (1)')
